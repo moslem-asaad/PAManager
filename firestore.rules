@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedInAs(userId) { return request.auth != null && request.auth.uid == userId; }
+    function validUser() {
+      return request.resource.data.keys().hasOnly(['email', 'createdAt', 'updatedAt'])
+        && request.resource.data.email is string && request.resource.data.email.size() <= 254;
+    }
+    function validYear(yearId) {
+      return request.resource.data.keys().hasOnly(['year', 'createdAt', 'updatedAt'])
+        && request.resource.data.year is int
+        && request.resource.data.year >= 1900 && request.resource.data.year <= 2200
+        && request.resource.data.year == int(yearId);
+    }
+    function validMonth(monthId) {
+      let m = request.resource.data.monthNumber;
+      return request.resource.data.keys().hasOnly(['monthNumber', 'walletValue', 'expectedIncome', 'updatedAt'])
+        && m is int && m >= 0 && m <= 12 && m == int(monthId)
+        && (m == 0 || (request.resource.data.walletValue is number
+          && request.resource.data.walletValue >= 0
+          && request.resource.data.expectedIncome is number
+          && request.resource.data.expectedIncome >= 0));
+    }
+    function validPayment() {
+      return request.resource.data.keys().hasOnly(['recipient', 'amount', 'paid', 'createdAt', 'updatedAt'])
+        && request.resource.data.recipient is string
+        && request.resource.data.recipient.size() > 0 && request.resource.data.recipient.size() <= 120
+        && request.resource.data.amount is number && request.resource.data.amount > 0
+        && request.resource.data.paid is bool;
+    }
+    match /users/{userId} {
+      allow read, delete: if signedInAs(userId);
+      allow create, update: if signedInAs(userId) && validUser();
+      match /years/{yearId} {
+        allow read, delete: if signedInAs(userId);
+        allow create, update: if signedInAs(userId) && validYear(yearId);
+        match /months/{monthId} {
+          allow read, delete: if signedInAs(userId);
+          allow create, update: if signedInAs(userId) && validMonth(monthId);
+          match /payments/{paymentId} {
+            allow read, delete: if signedInAs(userId);
+            allow create, update: if signedInAs(userId) && validPayment();
+          }
+        }
+      }
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
