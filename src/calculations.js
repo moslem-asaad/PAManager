@@ -28,6 +28,11 @@ export function visibleEmptyRows(paymentCount, adjustment = 0, hasDraft = false)
   return Math.max(hasDraft ? 1 : 0, baseRows + adjustment);
 }
 
+export function nextAvailableYear(years, currentYear) {
+  const laterYears = years.filter((year) => year > currentYear);
+  return laterYears.length ? Math.min(...laterYears) : null;
+}
+
 export function calculateMonth(walletValue, expectedIncome, payments = []) {
   const total = payments.reduce((sum, item) => sum + toAmount(item.amount), 0);
   const paid = payments.reduce(

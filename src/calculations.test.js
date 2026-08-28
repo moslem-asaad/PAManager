@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateMonth, formatMoney, normalizeNumericInput, validateBackup, validatePayment, visibleEmptyRows } from "./calculations.js";
+import { calculateMonth, formatMoney, nextAvailableYear, normalizeNumericInput, validateBackup, validatePayment, visibleEmptyRows } from "./calculations.js";
 
 describe("عرض المبالغ", () => {
   it("يعرض أرقامًا إنجليزية بلا صفرين ويحافظ على الكسر الحقيقي", () => {
@@ -24,6 +24,13 @@ describe("أسطر الدفعات الفارغة", () => {
     expect(visibleEmptyRows(0, 0)).toBe(5);
     expect(visibleEmptyRows(0, -5)).toBe(0);
     expect(visibleEmptyRows(0, -4)).toBe(1);
+  });
+});
+
+describe("التنقل بين السنوات", () => {
+  it("يختار أقرب سنة أحدث بصرف النظر عن ترتيب القائمة", () => {
+    expect(nextAvailableYear([2028, 2026, 2027], 2026)).toBe(2027);
+    expect(nextAvailableYear([2028, 2026, 2027], 2028)).toBeNull();
   });
 });
 

@@ -1,10 +1,12 @@
 import "./style.css";
 import { authApi, storeApi } from "./firebase.js";
 import { firebaseConfig } from "../firebase-config.js";
-import { calculateMonth, formatMoney, normalizeNumericInput, validateBackup, validatePayment, visibleEmptyRows } from "./calculations.js";
+import { calculateMonth, formatMoney, nextAvailableYear, normalizeNumericInput, validateBackup, validatePayment, visibleEmptyRows } from "./calculations.js";
 
 const app = document.querySelector("#app");
-const state = { user: null, years: [], year: null, months: new Map(), drafts: new Map(), extraRows: new Map(), unsubs: [], calculated: new Map(), dirty: new Set(), busy: false };
+const state = { user: null, years: [], year: null, visibleYears: [], months: new Map(), drafts: new Map(), extraRows: new Map(), unsubs: [], calculated: new Map(), dirty: new Set(), busy: false };
+let yearScrollLocked = false;
+let lastScrollPosition = 0;
 const firebaseConfigured = !Object.values(firebaseConfig).some((value) => String(value).includes("YOUR_"));
 
 const escapeHtml = (text = "") => String(text).replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c]);
@@ -106,30 +108,43 @@ function showEmptyYears() {
 function showLoadError(error) {
   document.querySelector("#content").innerHTML = `<div class="empty-state error-box"><h2>تعذر تحميل البيانات</h2><p>${escapeHtml(firebaseError(error))}</p><button class="primary" onclick="location.reload()">إعادة المحاولة</button></div>`;
 }
-function clearMonthListeners() { state.unsubs.forEach((fn) => fn()); state.unsubs = []; state.months.clear(); state.drafts.clear(); state.extraRows.clear(); state.calculated.clear(); state.dirty.clear(); }
+const monthKey = (year, month) => `${year}:${month}`;
+function clearMonthListeners() { state.unsubs.forEach((fn) => fn()); state.unsubs = []; state.visibleYears = []; state.months.clear(); state.drafts.clear(); state.extraRows.clear(); state.calculated.clear(); state.dirty.clear(); }
 function selectYear(year) {
   if (year === state.year && state.unsubs.length) return;
   clearMonthListeners(); state.year = year; updateYearSelect();
-  document.querySelector("#content").innerHTML = `<div class="month-hint">اسحب أفقيًا للتنقل بين الأشهر</div><div id="months-board" class="months-board" aria-label="أشهر سنة ${year}">${Array.from({ length: 13 }, (_, month) => monthCard(month)).join("")}</div>`;
+  document.querySelector("#content").innerHTML = `<div class="month-hint">اسحب أفقيًا للتنقل بين الأشهر</div><div id="year-sections"></div>`;
+  appendYear(year);
+}
+function appendYear(year) {
+  if (state.visibleYears.includes(year)) return;
+  state.visibleYears.push(year);
+  const sections = document.querySelector("#year-sections"); if (!sections) return;
+  sections.querySelector(".next-year-hint")?.remove();
+  sections.insertAdjacentHTML("beforeend", `<section class="year-section" data-year="${year}" aria-labelledby="year-title-${year}"><h2 class="year-section-title" id="year-title-${year}">سنة ${year}</h2><div class="months-board" aria-label="أشهر سنة ${year}">${Array.from({ length: 13 }, (_, month) => monthCard(year, month)).join("")}</div></section>`);
+  const followingYear = nextAvailableYear(state.years, year);
+  if (followingYear) sections.insertAdjacentHTML("beforeend", `<div class="next-year-hint">تابع التمرير لإظهار سنة <strong>${followingYear}</strong><span aria-hidden="true">↓</span></div>`);
   for (let month = 0; month <= 12; month += 1) {
     const unsub = storeApi.watchMonth(state.user.uid, year, month, (change) => {
-      const current = state.months.get(month) || { monthNumber: month, walletValue: 0, expectedIncome: 0, payments: [] };
+      const key = monthKey(year, month);
+      const current = state.months.get(key) || { monthNumber: month, walletValue: 0, expectedIncome: 0, payments: [] };
       if (change.type === "month" && change.data) Object.assign(current, change.data);
       if (change.type === "payments") current.payments = change.data;
-      state.months.set(month, current); renderMonth(month);
+      state.months.set(key, current); renderMonth(year, month);
       saveState(change.metadata.hasPendingWrites ? "تغييرات بانتظار المزامنة" : (navigator.onLine ? "تم الحفظ" : "غير متصل بالإنترنت"), change.metadata.hasPendingWrites || !navigator.onLine ? "offline" : "saved");
-    }, (error) => { document.querySelector(`#month-${month} .payments`).innerHTML = `<p class="inline-error">${escapeHtml(firebaseError(error))}</p>`; });
+    }, (error) => { document.querySelector(`#month-${year}-${month} .payments`).innerHTML = `<p class="inline-error">${escapeHtml(firebaseError(error))}</p>`; });
     state.unsubs.push(unsub);
   }
 }
-function monthCard(month) {
-  return `<article class="month-card ${month === 0 ? "month-zero" : ""}" id="month-${month}"><header><span class="month-number">${month}</span><div><p>دفتر السنة</p><h2>شهر ${month}</h2></div></header>
+function monthCard(year, month) {
+  return `<article class="month-card ${month === 0 ? "month-zero" : ""}" id="month-${year}-${month}"><header><span class="month-number">${month}</span><div><p>دفتر السنة</p><h2>شهر ${month} — ${year}</h2></div></header>
     ${month ? `<div class="money-fields"><label>قيمة المحفظة الحالية المتوقعة<input inputmode="decimal" type="text" data-field="walletValue" placeholder="اكتب المبلغ"></label><label>المدخول المتوقع للشهر<input inputmode="decimal" type="text" data-field="expectedIncome" placeholder="اكتب المبلغ"></label></div>` : `<p class="zero-description">دفعات جانبية لا تدخل فيها المحفظة أو المدخول.</p>`}
     <div class="list-heading"><h3>الدفعات</h3><span class="payment-count">0 دفعات</span></div><div class="payments" role="table" aria-label="دفعات شهر ${month}"><div class="mini-loading"></div></div>
     <button class="add-payment secondary wide">+ إضافة سطر</button><button class="calculate primary wide">${month ? "احسب هذا الشهر" : "احسب شهر 0"}</button><div class="summary-slot"></div></article>`;
 }
-function renderMonth(month) {
-  const card = document.querySelector(`#month-${month}`), data = state.months.get(month); if (!card || !data) return;
+function renderMonth(year, month) {
+  const key = monthKey(year, month);
+  const card = document.querySelector(`#month-${year}-${month}`), data = state.months.get(key); if (!card || !data) return;
   if (month) card.querySelectorAll("[data-field]").forEach((input) => {
     if (document.activeElement !== input) {
       const value = data[input.dataset.field];
@@ -137,8 +152,8 @@ function renderMonth(month) {
     }
   });
   card.querySelector(".payment-count").textContent = `${data.payments.length} ${data.payments.length === 1 ? "دفعة" : "دفعات"}`;
-  const draft = state.drafts.get(month);
-  const availableRows = visibleEmptyRows(data.payments.length, state.extraRows.get(month) || 0, Boolean(draft));
+  const draft = state.drafts.get(key);
+  const availableRows = visibleEmptyRows(data.payments.length, state.extraRows.get(key) || 0, Boolean(draft));
   const draftSlot = Math.min(draft?.slot ?? 0, availableRows - 1);
   const draftMarkup = `<div class="payment draft-row" role="row"><div class="amount-cell" role="cell"><input class="inline-amount draft-amount" type="text" inputmode="decimal" value="${escapeHtml(draft?.amount ?? "")}" placeholder="المبلغ" aria-label="قيمة الدفعة الجديدة"></div><div class="recipient-cell" role="cell"><input class="inline-recipient draft-recipient" maxlength="120" value="${escapeHtml(draft?.recipient ?? "")}" placeholder="اسم الجهة" aria-label="الجهة الجديدة"><button class="cancel-draft" aria-label="إلغاء السطر الجديد">×</button></div></div>`;
   const availableMarkup = Array.from({ length: availableRows }, (_, slot) => draft && slot === draftSlot
@@ -147,10 +162,11 @@ function renderMonth(month) {
   card.querySelector(".payments").innerHTML = `<div class="payment-table-head" role="row"><span role="columnheader">قيمة الدفع</span><span role="columnheader">الجهة المدفوع لها</span></div>${data.payments.map((p) => `<div class="payment ${p.paid ? "paid" : ""}" data-id="${escapeHtml(p.id)}" role="row">
     <div class="amount-cell" role="cell"><input class="inline-amount" type="text" inputmode="decimal" value="${p.amount}" aria-label="قيمة دفعة ${escapeHtml(p.recipient)}"><label class="paid-check"><input type="checkbox" ${p.paid ? "checked" : ""} aria-label="${p.paid ? "إلغاء تحديد" : "تحديد"} دفعة ${escapeHtml(p.recipient)} كمدفوعة"><span aria-hidden="true">✓</span></label>${p.paid ? `<small>تم الدفع</small>` : ""}</div>
     <div class="recipient-cell" role="cell"><input class="inline-recipient" maxlength="120" value="${escapeHtml(p.recipient)}" aria-label="الجهة المدفوع لها"><div class="payment-actions"><button class="delete" aria-label="حذف دفعة ${escapeHtml(p.recipient)}">×</button></div></div></div>`).join("")}${availableMarkup}`;
-  wireMonth(card, month, data); renderSummary(month);
+  wireMonth(card, year, month, data); renderSummary(year, month);
 }
-function markDirty(month) { if (state.calculated.has(month)) { state.dirty.add(month); renderSummary(month); } }
-function wireMonth(card, month, data) {
+function markDirty(year, month) { const key = monthKey(year, month); if (state.calculated.has(key)) { state.dirty.add(key); renderSummary(year, month); } }
+function wireMonth(card, year, month, data) {
+  const key = monthKey(year, month);
   card.querySelectorAll("[data-field], .inline-amount").forEach((input) => {
     input.onfocus = () => { if (input.value) input.select(); };
   });
@@ -158,102 +174,81 @@ function wireMonth(card, month, data) {
     input.onkeydown = (event) => { if (event.key === "Enter") input.blur(); };
   });
   card.querySelector(".add-payment").onclick = () => {
-    state.extraRows.set(month, (state.extraRows.get(month) || 0) + 1);
-    renderMonth(month);
+    state.extraRows.set(key, (state.extraRows.get(key) || 0) + 1);
+    renderMonth(year, month);
     card.querySelector(".payments")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   };
   card.querySelectorAll(".placeholder-row").forEach((row) => {
     const activate = () => {
-      if (!state.drafts.has(month)) {
-        state.drafts.set(month, { recipient: "", amount: "", slot: Number(row.dataset.emptySlot) });
-        renderMonth(month);
+      if (!state.drafts.has(key)) {
+        state.drafts.set(key, { recipient: "", amount: "", slot: Number(row.dataset.emptySlot) });
+        renderMonth(year, month);
       }
-      setTimeout(() => document.querySelector(`#month-${month} .draft-recipient`)?.focus(), 0);
+      setTimeout(() => document.querySelector(`#month-${year}-${month} .draft-recipient`)?.focus(), 0);
     };
     row.onclick = activate;
     row.onkeydown = (event) => { if (!event.target.closest("button") && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); activate(); } };
     row.querySelector(".delete-empty-row").onclick = (event) => {
       event.stopPropagation();
-      state.extraRows.set(month, (state.extraRows.get(month) || 0) - 1);
-      renderMonth(month);
+      state.extraRows.set(key, (state.extraRows.get(key) || 0) - 1);
+      renderMonth(year, month);
     };
   });
-  card.querySelector(".calculate").onclick = () => { state.calculated.set(month, calculateMonth(data.walletValue, data.expectedIncome, data.payments)); state.dirty.delete(month); renderSummary(month); };
+  card.querySelector(".calculate").onclick = () => { state.calculated.set(key, calculateMonth(data.walletValue, data.expectedIncome, data.payments)); state.dirty.delete(key); renderSummary(year, month); };
   card.querySelectorAll("[data-field]").forEach((input) => input.onchange = async () => {
     const value = Number(normalizeNumericInput(input.value)); if (!Number.isFinite(value) || value < 0) { toast("أدخل قيمة صحيحة لا تقل عن صفر.", "error"); input.value = Number(data[input.dataset.field]) === 0 ? "" : (data[input.dataset.field] ?? ""); return; }
-    data[input.dataset.field] = value; markDirty(month); await action(() => storeApi.updateMonth(state.user.uid, state.year, month, { [input.dataset.field]: value }));
+    data[input.dataset.field] = value; markDirty(year, month); await action(() => storeApi.updateMonth(state.user.uid, year, month, { [input.dataset.field]: value }));
   });
   card.querySelectorAll(".payment[data-id]").forEach((row) => {
     const payment = data.payments.find((p) => p.id === row.dataset.id);
-    row.querySelector(".paid-check input").onchange = async (event) => { markDirty(month); await action(() => storeApi.updatePayment(state.user.uid, state.year, month, payment.id, { paid: event.target.checked })); };
+    row.querySelector(".paid-check input").onchange = async (event) => { markDirty(year, month); await action(() => storeApi.updatePayment(state.user.uid, year, month, payment.id, { paid: event.target.checked })); };
     row.querySelector(".inline-recipient").onchange = async (event) => {
       const result = validatePayment(event.target.value, payment.amount);
       if (!result.valid) { toast(result.errors.recipient, "error"); event.target.value = payment.recipient; return; }
-      markDirty(month); await action(() => storeApi.updatePayment(state.user.uid, state.year, month, payment.id, { recipient: result.value.recipient }));
+      markDirty(year, month); await action(() => storeApi.updatePayment(state.user.uid, year, month, payment.id, { recipient: result.value.recipient }));
     };
     row.querySelector(".inline-amount").onchange = async (event) => {
       const result = validatePayment(payment.recipient, event.target.value);
       if (!result.valid) { toast(result.errors.amount, "error"); event.target.value = payment.amount; return; }
-      markDirty(month); await action(() => storeApi.updatePayment(state.user.uid, state.year, month, payment.id, { amount: result.value.amount }));
+      markDirty(year, month); await action(() => storeApi.updatePayment(state.user.uid, year, month, payment.id, { amount: result.value.amount }));
     };
-    row.querySelector(".delete").onclick = () => confirmAction("حذف الدفعة؟", `سيتم حذف دفعة «${payment.recipient}» نهائيًا.`, "حذف الدفعة", async () => { markDirty(month); await action(() => storeApi.deletePayment(state.user.uid, state.year, month, payment.id), "تم حذف الدفعة."); });
+    row.querySelector(".delete").onclick = () => confirmAction("حذف الدفعة؟", `سيتم حذف دفعة «${payment.recipient}» نهائيًا.`, "حذف الدفعة", async () => { markDirty(year, month); await action(() => storeApi.deletePayment(state.user.uid, year, month, payment.id), "تم حذف الدفعة."); });
   });
   const draftRow = card.querySelector(".draft-row");
   if (draftRow) {
-    const draft = state.drafts.get(month);
+    const draft = state.drafts.get(key);
     const trySaveDraft = async () => {
       const result = validatePayment(draft.recipient, draft.amount);
       if (!result.valid) return;
       if (draft.saving) return; draft.saving = true;
-      state.drafts.delete(month);
-      renderMonth(month);
+      state.drafts.delete(key);
+      renderMonth(year, month);
       try {
-        markDirty(month);
-        await action(() => storeApi.addPayment(state.user.uid, state.year, month, { ...result.value, paid: false }), "تمت إضافة السطر.");
+        markDirty(year, month);
+        await action(() => storeApi.addPayment(state.user.uid, year, month, { ...result.value, paid: false }), "تمت إضافة السطر.");
       } catch {
         draft.saving = false;
-        state.drafts.set(month, draft);
-        renderMonth(month);
+        state.drafts.set(key, draft);
+        renderMonth(year, month);
       }
     };
     draftRow.querySelector(".draft-recipient").oninput = (event) => { draft.recipient = event.target.value; };
     draftRow.querySelector(".draft-amount").oninput = (event) => { draft.amount = event.target.value; };
     draftRow.querySelector(".draft-recipient").onchange = trySaveDraft;
     draftRow.querySelector(".draft-amount").onchange = trySaveDraft;
-    draftRow.querySelector(".cancel-draft").onclick = () => { state.drafts.delete(month); renderMonth(month); };
+    draftRow.querySelector(".cancel-draft").onclick = () => { state.drafts.delete(key); renderMonth(year, month); };
   }
 }
-function renderSummary(month) {
-  const slot = document.querySelector(`#month-${month} .summary-slot`); if (!slot) return;
-  const result = state.calculated.get(month); if (!result) { slot.innerHTML = ""; return; }
-  slot.innerHTML = `<section class="summary"><div class="summary-head"><h3>ملخص الحساب</h3><span>لحظة الضغط</span></div>${state.dirty.has(month) ? `<p class="stale-note">تم تعديل البيانات؛ اضغط على زر الحساب لتحديث النتيجة.</p>` : ""}
+function renderSummary(year, month) {
+  const key = monthKey(year, month);
+  const slot = document.querySelector(`#month-${year}-${month} .summary-slot`); if (!slot) return;
+  const result = state.calculated.get(key); if (!result) { slot.innerHTML = ""; return; }
+  slot.innerHTML = `<section class="summary"><div class="summary-head"><h3>ملخص الحساب</h3><span>لحظة الضغط</span></div>${state.dirty.has(key) ? `<p class="stale-note">تم تعديل البيانات؛ اضغط على زر الحساب لتحديث النتيجة.</p>` : ""}
     ${month ? `<div><span>المحفظة</span><strong>${formatMoney(result.wallet)}</strong></div><div><span>المدخول</span><strong>${formatMoney(result.income)}</strong></div>` : ""}
     <div><span>جميع الدفعات</span><strong>${formatMoney(result.total)}</strong></div><div><span>المدفوع</span><strong>${formatMoney(result.paid)}</strong></div><div><span>غير المدفوع</span><strong>${formatMoney(result.unpaid)}</strong></div>
     ${month ? `<div class="remaining"><span>المتبقي المتوقع</span><strong>${formatMoney(result.remaining)}</strong></div>` : ""}</section>`;
 }
 
-function openPaymentDialog(month, payment = null) {
-  const dialog = document.querySelector("#payment-dialog"); dialog.innerHTML = `<form method="dialog" class="dialog-card" id="payment-form" novalidate><button type="button" class="dialog-close" aria-label="إغلاق">×</button>
-    <p class="eyebrow">شهر ${month}</p><h2>${payment ? "تعديل الدفعة" : "إضافة دفعة جديدة"}</h2><label>الجهة المدفوع لها<input name="recipient" maxlength="120" value="${escapeHtml(payment?.recipient || "")}" autocomplete="off"><small class="field-error" id="recipient-error"></small></label>
-    <label>مبلغ الدفع بالشيكل<input name="amount" type="number" inputmode="decimal" min="0.01" step="0.01" value="${payment?.amount ?? ""}" placeholder="مثال: 3500"><small class="field-error" id="amount-error"></small></label>
-    <div class="dialog-actions"><button type="button" class="secondary cancel-payment">إلغاء</button><button type="submit" value="default" class="primary">حفظ الدفعة</button></div></form>`;
-  const form = dialog.querySelector("form"); let changed = false; form.addEventListener("input", () => { changed = true; });
-  const closeDialog = () => {
-    if (!changed || confirm("سيضيع الإدخال غير المحفوظ. هل تريد الإغلاق؟")) dialog.close();
-  };
-  dialog.querySelector(".dialog-close").onclick = closeDialog;
-  dialog.querySelector(".cancel-payment").onclick = closeDialog;
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault(); const result = validatePayment(form.recipient.value, form.amount.value);
-    form.querySelector("#recipient-error").textContent = result.errors.recipient || ""; form.querySelector("#amount-error").textContent = result.errors.amount || "";
-    if (!result.valid) { (result.errors.recipient ? form.recipient : form.amount).focus(); return; }
-    const button = form.querySelector("[type=submit]"); if (state.busy) return; state.busy = true; button.disabled = true;
-    try { markDirty(month); await action(() => payment ? storeApi.updatePayment(state.user.uid, state.year, month, payment.id, result.value) : storeApi.addPayment(state.user.uid, state.year, month, { ...result.value, paid: false }), payment ? "تم تعديل الدفعة." : "تمت إضافة الدفعة."); changed = false; dialog.close(); }
-    finally { state.busy = false; button.disabled = false; }
-  });
-  dialog.addEventListener("cancel", (event) => { if (changed && !confirm("سيضيع الإدخال غير المحفوظ. هل تريد الإغلاق؟")) event.preventDefault(); }, { once: true });
-  dialog.showModal(); setTimeout(() => form.recipient.focus(), 0);
-}
 function confirmAction(title, description, confirmLabel, callback) {
   const dialog = document.querySelector("#confirm-dialog"); dialog.innerHTML = `<form method="dialog" class="dialog-card compact"><div class="warning-icon">!</div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p><div class="dialog-actions"><button value="cancel" class="secondary">إلغاء</button><button value="confirm" class="danger">${escapeHtml(confirmLabel)}</button></div></form>`;
   dialog.onclose = () => { if (dialog.returnValue === "confirm") callback(); }; dialog.showModal();
@@ -293,6 +288,19 @@ function eraseAll() {
 
 window.addEventListener("online", () => saveState("عاد الاتصال — جارٍ المزامنة...", "saving"));
 window.addEventListener("offline", () => saveState("غير متصل بالإنترنت", "offline"));
+window.addEventListener("scroll", () => {
+  const scrollingDown = window.scrollY > lastScrollPosition;
+  lastScrollPosition = window.scrollY;
+  if (!scrollingDown || yearScrollLocked || !state.user || !state.year || document.querySelector("dialog[open]")) return;
+  const reachedBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 8;
+  const lastVisibleYear = state.visibleYears.at(-1) ?? state.year;
+  const followingYear = nextAvailableYear(state.years, lastVisibleYear);
+  if (!reachedBottom || !followingYear) return;
+  yearScrollLocked = true;
+  appendYear(followingYear);
+  toast(`تم إظهار سنة ${followingYear} أسفل السنة السابقة.`);
+  setTimeout(() => { yearScrollLocked = false; lastScrollPosition = window.scrollY; }, 500);
+}, { passive: true });
 renderAuth();
 try {
   authApi.observe((user) => { clearMonthListeners(); state.user = user; state.year = null; state.years = []; if (!user) renderAuth(); else { appShell(); state.unsubs.push(watchYears()); } });
